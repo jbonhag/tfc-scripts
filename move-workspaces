@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+help() {
+  echo "Move a set of Terraform Cloud workspaces to a project."
+  echo
+  echo "Usage: TFE_TOKEN=abcd.atlasv1.efgh... move-workspaces PROJECT_ID"
+  echo 
+  echo "This script assumes that the TFE_TOKEN environment variable is set,"
+  echo "and that the token has sufficient permissions to perform the move."
+  echo
+  echo "The token should have one or more of the following permissions:"
+  echo "- Organization-level 'Manage all projects & workspaces'"
+  echo "- Team-level Admin permissions on the current and destination"
+  echo "  projects"
+}
+
+while getopts ":h" option; do
+  case ${option} in
+    h|help)
+      help
+      exit
+      ;;
+  esac
+done
+
+if [ $# -ne 1 ]; then
+  help
+  exit
+fi
+
+TFE_TOKEN="${TFE_TOKEN:-}"
+if [[ -z "${TFE_TOKEN}" ]]; then
+  echo "Please set the TFE_TOKEN environment variable to a valid Terraform Cloud token."
+  exit
+fi
+
+project_id="$1"
+
+count_moved=0
+count_error=0
+
+while read -r workspace_id; do
+  organization_name="${workspace_id%/*}"
+  workspace_name="${workspace_id#*/}"
+
+  payload=$(cat <<EOF
+  {
+    "data": {
+      "id": "${workspace_id}",
+      "relationships": {
+        "project": {
+          "data": {
+            "type": "projects",
+            "id": "${project_id}"
+          }
+        }
+      },
+      "type": "workspaces"
+    }
+  }
+EOF
+)
+
+http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+  --header "Authorization: Bearer ${TFE_TOKEN}" \
+  --header "Content-Type: application/vnd.api+json" \
+  --request PATCH \
+  --data "${payload}" \
+  "https://app.terraform.io/api/v2/organizations/${organization_name}/workspaces/${workspace_name}")
+  if [ "${http_code}" -eq 200 ]; then
+    count_moved=$((count_moved + 1))
+    echo "Workspace ${workspace_id} was moved."
+  else
+    count_error=$((count_error + 1))
+    echo "Error: workspace ${workspace_id} could not be moved."
+  fi
+done < workspaces.txt
+
+if [ ${count_error} -eq 0 ]; then
+  echo "Success! ${count_moved} workspaces moved."
+else
+  echo "${count_moved} workspace(s) moved."
+  echo "${count_error} workspace(s) not moved."
+fi
